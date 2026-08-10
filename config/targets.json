@@ -1,0 +1,28 @@
+{
+  "settings": {
+    "timeout_seconds": 5,
+    "max_acceptable_latency_ms": 1000
+  },
+  "targets": [
+    {
+      "name": "Google Search",
+      "url": "https://www.google.com",
+      "expected_status": 200
+    },
+    {
+      "name": "GitHub API Health",
+      "url": "https://api.github.com",
+      "expected_status": 200
+    },
+    {
+      "name": "Simulated Timeout Service",
+      "url": "https://httpbin.org/delay/10",
+      "expected_status": 200
+    },
+    {
+      "name": "Non Existent Server",
+      "url": "https://domain-that-does-not-exist-12345.com",
+      "expected_status": 200
+    }
+  ]
+}
