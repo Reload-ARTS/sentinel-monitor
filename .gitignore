@@ -1,0 +1,16 @@
+# Entorno Virtual
+venv/
+env/
+.venv/
+
+# Variables de entorno y secretos
+.env
+
+# Cache de Python
+__pycache__/
+*.py[cod]
+
+# Testing y Cobertura
+.pytest_cache/
+.coverage
+htmlcov/
