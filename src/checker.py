@@ -8,14 +8,18 @@ from typing import Dict, Any, Optional, Literal
 import json
 import logging
 import math
+import os
+from pathlib import Path
 import sys
 import time
 import requests
 
 if __package__:
     from .config import ConfigurationError, load_config
+    from .notifier import AlertNotifier, validate_alert_settings
 else:
     from config import ConfigurationError, load_config
+    from notifier import AlertNotifier, validate_alert_settings
 
 logger = logging.getLogger("SentinelChecker")
 
@@ -160,7 +164,7 @@ def _target_result(result, target, index):
 
 
 def run_monitoring() -> Dict[str, Any]:
-    """Coordina una pasada. Las alertas están deshabilitadas por diseño en Etapa 04."""
+    """Valida todas las fuentes antes de comprobar y notifica únicamente DOWN."""
     try:
         config = load_targets_from_config()
         targets = config["targets"]
@@ -168,6 +172,13 @@ def run_monitoring() -> Dict[str, Any]:
             raise ValueError("Contrato del cargador incumplido")
         # Establecer identidades seguras antes de poder informar objetivos pendientes.
         identities = [_target_identity(target, index) for index, target in enumerate(targets)]
+        # Carga explícita en la entrada; importar módulos no lee archivos .env.
+        from dotenv import load_dotenv
+        try:
+            load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
+        except (OSError, UnicodeError):
+            raise ConfigurationError("Entorno: no se pudo leer la configuración local de alertas.") from None
+        alerts_enabled, webhook = validate_alert_settings(os.environ)
     except ConfigurationError as exc:
         logger.error("Configuración inválida: %s", exc)
         return _report("not_started", [], [],
@@ -182,9 +193,25 @@ def run_monitoring() -> Dict[str, Any]:
         settings = config["settings"]
         checker = ServiceChecker(timeout_seconds=settings["timeout_seconds"],
                                  max_acceptable_latency_ms=settings["max_acceptable_latency_ms"])
+        notifier = AlertNotifier(webhook) if alerts_enabled else None
         for index, target in enumerate(targets):
             result = checker.check_target(target["name"], target["url"], target["expected_status"])
-            results.append(_target_result(result, target, index))
+            entry = _target_result(result, target, index)
+            results.append(entry)
+            if entry["status"] == "DOWN" and alerts_enabled:
+                notifier.attempt_started = False
+                entry["notification"] = "not_attempted"
+                payload = notifier.prepare_alert(entry["name"], entry["http_status"])
+                try:
+                    outcome = notifier.send_alert(payload)
+                    if outcome not in ("accepted", "failed"):
+                        raise ValueError("Resultado de notificación inválido")
+                    entry["notification"] = outcome
+                except Exception:
+                    if notifier.attempt_started:
+                        entry["notification"] = "failed"
+                    raise
+                logger.info("Notificación Discord: %s", entry["notification"])
     except Exception:
         # Frontera de ejecución: conservar evidencia, no ocultar el error como DOWN.
         logger.error("Error interno: no fue posible completar las comprobaciones.")
@@ -199,21 +226,23 @@ def main() -> int:
     """Emite exactamente un documento JSON; diagnósticos exclusivamente en stderr."""
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-    previous_level = logger.level
-    previous_propagation = logger.propagate
-    previous_handlers = logger.handlers[:]
-    logger.handlers = [handler]
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
+    # dotenv puede emitir avisos de parsing; tampoco deben llegar a stdout.
+    managed_loggers = (logger, logging.getLogger("dotenv.main"))
+    previous = [(item, item.level, item.propagate, item.handlers[:]) for item in managed_loggers]
+    for item in managed_loggers:
+        item.handlers = [handler]
+        item.setLevel(logging.INFO)
+        item.propagate = False
     try:
         report = run_monitoring()
         print(json.dumps(report, indent=2, ensure_ascii=True, allow_nan=False))
         return report["exit_code"]
     finally:
-        logger.handlers = previous_handlers
+        for item, level, propagation, handlers in previous:
+            item.handlers = handlers
+            item.setLevel(level)
+            item.propagate = propagation
         handler.close()
-        logger.setLevel(previous_level)
-        logger.propagate = previous_propagation
 
 
 if __name__ == "__main__":

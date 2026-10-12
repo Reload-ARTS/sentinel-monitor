@@ -1,85 +1,74 @@
-"""
-Módulo de Notificaciones y Alertas en Tiempo Real.
-Maneja el envío de alertas mediante Webhooks (Discord/Slack/Teams).
-"""
+"""Validación local y envío Discord, sin efectos secundarios al importar."""
 
-import os
+import re
 import logging
-from typing import Dict, Any, Optional
+from urllib.parse import urlsplit
+
 import requests
-from dotenv import load_dotenv
 
-# Cargar variables de entorno desde .env
-load_dotenv()
+if __package__:
+    from .config import ConfigurationError
+else:
+    from config import ConfigurationError
 
-logger = logging.getLogger("SentinelNotifier")
+
+def validate_alert_settings(environ):
+    """Interpreta las variables existentes sin red ni diagnósticos sensibles."""
+    flag = environ.get("ENABLE_ALERTS", "true").strip().lower()
+    if flag not in ("true", "false"):
+        raise ConfigurationError("ENABLE_ALERTS: debe ser true o false.")
+    if flag == "false":
+        return False, None
+    webhook = environ.get("WEBHOOK_URL", "")
+    try:
+        if not webhook or any(ord(c) < 33 or ord(c) >= 127 for c in webhook):
+            raise ValueError
+        parsed = urlsplit(webhook)
+        if (parsed.scheme != "https" or parsed.hostname != "discord.com"
+                or parsed.username is not None or parsed.password is not None
+                or parsed.port not in (None, 443) or parsed.netloc.endswith(":")
+                or parsed.query or parsed.fragment or "TU_WEBHOOK_AQUI" in webhook
+                or not re.fullmatch(r"/api(?:/v[0-9]+)?/webhooks/[0-9]+/[A-Za-z0-9_-]+", parsed.path)):
+            raise ValueError
+    except ValueError:
+        raise ConfigurationError("WEBHOOK_URL: se requiere un webhook Discord HTTPS válido con alertas habilitadas.") from None
+    return True, webhook
 
 
 class AlertNotifier:
-    """Clase para la gestión y envío de alertas ante fallas o degradación de servicio."""
+    """Envía datos preparados sin leer implícitamente variables de entorno."""
 
-    def __init__(self, webhook_url: Optional[str] = None):
-        self.webhook_url = webhook_url or os.getenv("WEBHOOK_URL")
-        self.enabled = os.getenv("ENABLE_ALERTS", "true").lower() == "true"
+    def __init__(self, webhook_url):
+        self.webhook_url = webhook_url
+        self.attempt_started = False
 
-    def send_alert(self, target_name: str, url: str, reason: str, details: Optional[str] = None) -> bool:
-        """
-        Envía un mensaje de alerta enriquecido a través del Webhook configurado.
-        """
-        if not self.enabled:
-            logger.info("Alertas desactivadas por configuración (ENABLE_ALERTS=false).")
-            return False
-
-        # Formato de payload compatible con Discord Webhooks
-        payload = {
+    def prepare_alert(self, name, http_status):
+        """Payload limitado a la identificación segura y causa HTTP de la caída."""
+        reason = f"HTTP inesperado: {http_status}" if http_status is not None else "Timeout o fallo de transporte HTTP"
+        return {
             "username": "Sentinel Bot",
-            "avatar_url": "https://cdn-icons-png.flaticon.com/512/584/584052.png",
-            "embeds": [
-                {
-                    "title": f"🚨 ALERTA DE INFRAESTRUCTURA: {target_name}",
-                    "color": 15158332,  # Rojo de emergencia (Hex #E74C3C)
-                    "fields": [
-                        {"name": "Servicio", "value": target_name, "inline": True},
-                        {"name": "URL", "value": url, "inline": True},
-                        {"name": "Causa", "value": reason, "inline": False},
-                        {"name": "Detalles Técnicos", "value": details or "N/A", "inline": False}
-                    ],
-                    "footer": {"text": "Sentinel Infrastructure Health Monitor"}
-                }
-            ]
+            "allowed_mentions": {"parse": []},
+            "embeds": [{"title": "Alerta de infraestructura", "color": 15158332,
+                        "fields": [{"name": "Servicio", "value": name[:1024], "inline": False},
+                                   {"name": "Causa", "value": reason, "inline": False}]}],
         }
 
-        if not self.webhook_url or "TU_WEBHOOK_AQUI" in self.webhook_url:
-            logger.warning(
-                f"[MODO SIMULACIÓN] Alerta no enviada por Webhook no configurado.\n"
-                f"-> Servicio: {target_name} | Causa: {reason}"
-            )
-            return False
-
+    def send_alert(self, payload):
+        """Devuelve aceptación/fallo previsto; errores internos llegan al coordinador."""
+        # urllib3 puede registrar la ruta (que contiene el token) en modo debug.
+        transport_loggers = [logging.getLogger(name) for name in ("urllib3.connectionpool", "urllib3.util.retry")]
+        previous = [(item, item.disabled) for item in transport_loggers]
+        for item in transport_loggers:
+            item.disabled = True
         try:
-            response = requests.post(self.webhook_url, json=payload, timeout=5)
-            if response.status_code in (200, 204):
-                logger.info(f"Alerta enviada exitosamente para {target_name}")
-                return True
-            else:
-                logger.error(f"Error al enviar alerta por Webhook. HTTP {response.status_code}")
-                return False
-
-        except requests.exceptions.RequestException as exc:
-            logger.error(f"Fallo de conexión al enviar alerta vía Webhook: {exc}")
-            return False
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    logger.info("Iniciando prueba manual del Módulo de Notificaciones...")
-
-    notifier = AlertNotifier()
-    
-    # Prueba de alerta simulada
-    notifier.send_alert(
-        target_name="Servidor de Base de Datos",
-        url="https://db.internal.example.com",
-        reason="Fallo de conexión HTTP 500",
-        details="Timeout al intentar establecer conexión con el puerto 5432"
-    )
+            self.attempt_started = True
+            response = requests.post(self.webhook_url, json=payload, timeout=5, allow_redirects=False)
+            try:
+                return "accepted" if response.status_code in (200, 204) else "failed"
+            finally:
+                response.close()
+        except requests.exceptions.RequestException:
+            return "failed"
+        finally:
+            for item, disabled in previous:
+                item.disabled = disabled

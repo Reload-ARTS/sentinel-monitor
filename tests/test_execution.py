@@ -12,6 +12,8 @@ from src import checker
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
+    monkeypatch.setenv("ENABLE_ALERTS", "false")
+    monkeypatch.setattr("dotenv.load_dotenv", lambda **kwargs: False)
     def forbidden(*args, **kwargs):
         pytest.fail("Red inesperada")
     monkeypatch.setattr(requests.sessions.Session, "request", forbidden)
@@ -118,16 +120,19 @@ def test_config_error_has_unknown_total_and_no_network(config_file, capsys):
 
 
 @pytest.mark.parametrize("env_enabled", ["true", "false"])
-def test_notifications_disabled_by_design(config_file, monkeypatch, capsys, env_enabled):
+def test_notification_environment_controls_execution(config_file, monkeypatch, capsys, env_enabled):
     monkeypatch.setenv("ENABLE_ALERTS", env_enabled)
     monkeypatch.setenv("WEBHOOK_URL", "SECRET_WEBHOOK")
-    with patch("builtins.__import__", wraps=__import__) as imports, \
-            patch("requests.get", return_value=MagicMock(status_code=503)):
-        assert checker.main() == 1
-    report = json.loads(capsys.readouterr().out)
-    assert all(t["notification"] == "disabled" for t in report["targets"])
-    assert not any("notifier" in str(call.args[0]) or "dotenv" in str(call.args[0]) for call in imports.call_args_list)
-    assert "SECRET_WEBHOOK" not in json.dumps(report)
+    with patch("requests.get", return_value=MagicMock(status_code=503)) as get:
+        assert checker.main() == (2 if env_enabled == "true" else 1)
+    output = capsys.readouterr()
+    report = json.loads(output.out)
+    if env_enabled == "true":
+        assert report["execution_status"] == "not_started"
+        get.assert_not_called()
+    else:
+        assert all(t["notification"] == "disabled" for t in report["targets"])
+    assert "SECRET_WEBHOOK" not in output.out + output.err
 
 
 def test_transport_exception_text_and_sensitive_url_are_not_emitted(config_file, capsys):

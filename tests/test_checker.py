@@ -12,6 +12,8 @@ from src.checker import ServiceChecker, HealthCheckResult, classify_http_status
 def block_network(monkeypatch):
     """Incluso un mock omitido debe fallar antes de contactar la red."""
     import socket
+    monkeypatch.setenv("ENABLE_ALERTS", "false")
+    monkeypatch.setattr("dotenv.load_dotenv", lambda **kwargs: False)
 
     def forbidden(*args, **kwargs):
         pytest.fail("Solicitud de red inesperada")
