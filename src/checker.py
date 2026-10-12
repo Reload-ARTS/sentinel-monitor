@@ -10,6 +10,11 @@ import logging
 import time
 import requests
 
+if __package__:
+    from .config import ConfigurationError, load_config
+else:
+    from config import ConfigurationError, load_config
+
 # Configuración básica de Logging estructurado
 logging.basicConfig(
     level=logging.INFO,
@@ -91,14 +96,18 @@ class ServiceChecker:
 
 def load_targets_from_config(config_path: str = "config/targets.json") -> Dict[str, Any]:
     """Carga la configuración de objetivos desde un archivo JSON."""
-    with open(config_path, "r", encoding="utf-8") as file:
-        return json.load(file)
+    return load_config(config_path)
 
 
-if __name__ == "__main__":
+def main() -> int:
+    """Ejecuta una pasada solo después de validar toda la configuración JSON."""
     logger.info("Iniciando prueba manual del Motor de Chequeo...")
     
-    config = load_targets_from_config()
+    try:
+        config = load_targets_from_config()
+    except ConfigurationError as exc:
+        logger.error("Configuración inválida: %s", exc)
+        return 2
     timeout = config.get("settings", {}).get("timeout_seconds", 5)
     
     checker = ServiceChecker(timeout_seconds=timeout)
@@ -114,3 +123,8 @@ if __name__ == "__main__":
         
     print("\n--- RESUMEN DE RESULTADOS DE PRUEBA ---")
     print(json.dumps(results, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
