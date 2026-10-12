@@ -3,10 +3,12 @@ Módulo de Verificación de Endpoints HTTP/HTTPS.
 Proporciona la funcionalidad para evaluar disponibilidad y rendimiento de servicios web.
 """
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Dict, Any, Optional, Literal
 import json
 import logging
+import math
+import sys
 import time
 import requests
 
@@ -15,12 +17,6 @@ if __package__:
 else:
     from config import ConfigurationError, load_config
 
-# Configuración básica de Logging estructurado
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
 logger = logging.getLogger("SentinelChecker")
 
 HealthStatus = Literal["HEALTHY", "DEGRADED", "DOWN"]
@@ -76,7 +72,7 @@ class ServiceChecker:
                                           elapsed_time_ms, self.max_acceptable_latency_ms)
             error_msg = None if status != "DOWN" else f"Status Code {response.status_code} != {expected_status}"
             
-            logger.info(f"VERIFICADO: {name} ({url}) - Code: {response.status_code} - {elapsed_time_ms:.2f}ms")
+            logger.info("Comprobación %s: HTTP %s, %.2f ms", status, response.status_code, elapsed_time_ms)
             
             return HealthCheckResult(
                 target_name=name,
@@ -89,7 +85,7 @@ class ServiceChecker:
 
         except requests.exceptions.Timeout:
             elapsed_time_ms = (time.perf_counter() - start_time) * 1000
-            logger.warning(f"TIMEOUT: {name} ({url}) superó el tiempo límite de {self.timeout}s")
+            logger.warning("Timeout durante la comprobación HTTP.")
             return HealthCheckResult(
                 target_name=name,
                 url=url,
@@ -101,7 +97,7 @@ class ServiceChecker:
 
         except requests.exceptions.RequestException as exc:
             elapsed_time_ms = (time.perf_counter() - start_time) * 1000
-            logger.error(f"FALLO DE CONEXIÓN: {name} ({url}) - Error: {str(exc)}")
+            logger.error("Fallo de transporte durante la comprobación HTTP.")
             return HealthCheckResult(
                 target_name=name,
                 url=url,
@@ -117,32 +113,107 @@ def load_targets_from_config(config_path: str = "config/targets.json") -> Dict[s
     return load_config(config_path)
 
 
-def main() -> int:
-    """Ejecuta una pasada solo después de validar toda la configuración JSON."""
-    logger.info("Iniciando prueba manual del Motor de Chequeo...")
-    
+def _report(execution_status, targets, not_checked, errors, total, exit_code):
+    """Construye el resumen desde las listas, sin contadores independientes."""
+    return {
+        "schema_version": "1",
+        "execution_status": execution_status,
+        "summary": {
+            "total": total,
+            "checked": len(targets),
+            "healthy": sum(t["status"] == "HEALTHY" for t in targets),
+            "degraded": sum(t["status"] == "DEGRADED" for t in targets),
+            "down": sum(t["status"] == "DOWN" for t in targets),
+            "not_checked": len(not_checked),
+        },
+        "targets": targets,
+        "not_checked": not_checked,
+        "errors": errors,
+        "exit_code": exit_code,
+    }
+
+
+def _target_identity(target, index):
+    """No permite URLs o controles en identificadores públicos de resultados."""
+    name = target["name"]
+    if "://" in name or any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in name):
+        name = f"Objetivo {index + 1}"
+    return {"name": name}
+
+
+def _target_result(result, target, index):
+    # Una interrupción o resultado inválido no constituye evidencia de DOWN.
+    if result.status not in ("HEALTHY", "DEGRADED", "DOWN"):
+        raise ValueError("Resultado de salud inválido")
+    if (isinstance(result.response_time_ms, bool)
+            or not isinstance(result.response_time_ms, (int, float))
+            or not math.isfinite(result.response_time_ms) or result.response_time_ms < 0):
+        raise ValueError("Duración inválida")
+    code = result.status_code
+    if code is not None and (isinstance(code, bool) or not isinstance(code, int) or not 100 <= code <= 599):
+        raise ValueError("Código HTTP inválido")
+    if result.status != "DOWN" and code is None:
+        raise ValueError("Respuesta HTTP ausente")
+    return {**_target_identity(target, index), "status": result.status,
+            "http_status": code, "latency_ms": result.response_time_ms,
+            "notification": "disabled" if result.status == "DOWN" else "not_required"}
+
+
+def run_monitoring() -> Dict[str, Any]:
+    """Coordina una pasada. Las alertas están deshabilitadas por diseño en Etapa 04."""
     try:
         config = load_targets_from_config()
+        targets = config["targets"]
+        if not isinstance(targets, list) or not targets:
+            raise ValueError("Contrato del cargador incumplido")
+        # Establecer identidades seguras antes de poder informar objetivos pendientes.
+        identities = [_target_identity(target, index) for index, target in enumerate(targets)]
     except ConfigurationError as exc:
         logger.error("Configuración inválida: %s", exc)
-        return 2
-    settings = config["settings"]
-    
-    checker = ServiceChecker(timeout_seconds=settings["timeout_seconds"],
-                             max_acceptable_latency_ms=settings["max_acceptable_latency_ms"])
+        return _report("not_started", [], [],
+                       [{"type": "configuration_error", "message": "La configuración no es válida o no pudo leerse."}], None, 2)
+    except Exception:
+        logger.error("Error interno al preparar la ejecución.")
+        return _report("not_started", [], [],
+                       [{"type": "internal_error", "message": "No fue posible preparar las comprobaciones."}], None, 3)
+
     results = []
-    
-    for target in config.get("targets", []):
-        res = checker.check_target(
-            name=target["name"], 
-            url=target["url"], 
-            expected_status=target.get("expected_status", 200)
-        )
-        results.append({**asdict(res), "is_up": res.is_up})
-        
-    print("\n--- RESUMEN DE RESULTADOS DE PRUEBA ---")
-    print(json.dumps(results, indent=2))
-    return 0
+    try:
+        settings = config["settings"]
+        checker = ServiceChecker(timeout_seconds=settings["timeout_seconds"],
+                                 max_acceptable_latency_ms=settings["max_acceptable_latency_ms"])
+        for index, target in enumerate(targets):
+            result = checker.check_target(target["name"], target["url"], target["expected_status"])
+            results.append(_target_result(result, target, index))
+    except Exception:
+        # Frontera de ejecución: conservar evidencia, no ocultar el error como DOWN.
+        logger.error("Error interno: no fue posible completar las comprobaciones.")
+        remaining = identities[len(results):]
+        return _report("incomplete", results, remaining,
+                       [{"type": "internal_error", "message": "No fue posible completar las comprobaciones."}], len(targets), 3)
+    code = 1 if any(t["status"] == "DOWN" for t in results) else 0
+    return _report("completed", results, [], [], len(targets), code)
+
+
+def main() -> int:
+    """Emite exactamente un documento JSON; diagnósticos exclusivamente en stderr."""
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    previous_level = logger.level
+    previous_propagation = logger.propagate
+    previous_handlers = logger.handlers[:]
+    logger.handlers = [handler]
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    try:
+        report = run_monitoring()
+        print(json.dumps(report, indent=2, ensure_ascii=True, allow_nan=False))
+        return report["exit_code"]
+    finally:
+        logger.handlers = previous_handlers
+        handler.close()
+        logger.setLevel(previous_level)
+        logger.propagate = previous_propagation
 
 
 if __name__ == "__main__":

@@ -109,34 +109,42 @@ def test_entry_modes_validate_before_network(tmp_path, monkeypatch, capsys, capl
             assert code == 0
             assert get.call_count == 2
             get.assert_any_call("http://localhost/health", timeout=2, headers={"User-Agent": "SentinelMonitor/1.0"}, allow_redirects=False)
-            results = json.loads(out.out.split("--- RESUMEN DE RESULTADOS DE PRUEBA ---\n", 1)[1])
-            assert [result["is_up"] for result in results] == [True, True]
-            assert [result["status_code"] for result in results] == [200, 204]
+            report = json.loads(out.out)
+            assert report["exit_code"] == code
+            assert report["execution_status"] == "completed"
+            assert [result["status"] for result in report["targets"]] == ["HEALTHY", "HEALTHY"]
+            assert [result["http_status"] for result in report["targets"]] == [200, 204]
         else:
             assert code == 2
             get.assert_not_called()
-            assert out.out == ""
-            assert "targets[1].url" in caplog.text
+            assert json.loads(out.out)["execution_status"] == "not_started"
+            assert json.loads(out.out)["exit_code"] == 2
+            assert "targets[1].url" in out.err
             assert "SECRET" not in caplog.text + out.out + out.err
 
 
-def test_missing_configuration_returns_two(tmp_path, monkeypatch, caplog):
+def test_missing_configuration_returns_two(tmp_path, monkeypatch, capsys):
     from src.checker import main
 
     monkeypatch.chdir(tmp_path)
     assert main() == 2
-    assert "no se pudo leer" in caplog.text
+    assert "no se pudo leer" in capsys.readouterr().err
 
 
-def test_unexpected_loader_error_is_not_hidden(monkeypatch):
+def test_unexpected_loader_error_is_reported_safely(monkeypatch, capsys):
     from src import checker
 
     def broken():
         raise RuntimeError("Defecto interno")
 
     monkeypatch.setattr(checker, "load_targets_from_config", broken)
-    with pytest.raises(RuntimeError, match="Defecto interno"):
-        checker.main()
+    assert checker.main() == 3
+    output = capsys.readouterr()
+    report = __import__("json").loads(output.out)
+    assert report["execution_status"] == "not_started"
+    assert report["summary"]["total"] is None
+    assert report["errors"][0]["type"] == "internal_error"
+    assert "Defecto interno" not in output.out + output.err
 
 
 def test_numeric_parsing_failure_returns_two_without_network(tmp_path, monkeypatch, caplog, capsys):
@@ -156,8 +164,8 @@ def test_numeric_parsing_failure_returns_two_without_network(tmp_path, monkeypat
         get.assert_not_called()
         post.assert_not_called()
     output = capsys.readouterr()
-    assert output.out == ""
-    assert "valor numérico" in caplog.text
+    assert __import__("json").loads(output.out)["exit_code"] == 2
+    assert "valor numérico" in output.err
     assert "SECRET" not in caplog.text + output.out + output.err
     assert "999999" not in caplog.text + output.out + output.err
 
@@ -244,13 +252,12 @@ def test_main_uses_config_threshold_and_serializes_status(tmp_path, monkeypatch,
     with patch("requests.get", side_effect=[MagicMock(status_code=200), MagicMock(status_code=200), MagicMock(status_code=503)]), \
             patch("time.perf_counter", side_effect=[0, 0.025, 0, 0.075, 0, 0.1]), \
             patch("requests.post", side_effect=AssertionError("POST inesperado")) as post:
-        assert main() == 0  # D06 agregado sigue pendiente deliberadamente.
+        assert main() == 1
         post.assert_not_called()
     output = capsys.readouterr().out
-    assert output.startswith("\n--- RESUMEN DE RESULTADOS DE PRUEBA ---\n")
-    results = json.loads(output.split("--- RESUMEN DE RESULTADOS DE PRUEBA ---\n", 1)[1])
+    report = json.loads(output)
+    results = report["targets"]
     assert [result["status"] for result in results] == ["HEALTHY", "DEGRADED", "DOWN"]
-    assert [result["is_up"] for result in results] == [True, True, False]
-    assert results[1]["error_message"] is None
-    assert results[1]["response_time_ms"] == 75
-    assert set(results[0]) == {"target_name", "url", "status", "is_up", "status_code", "response_time_ms", "error_message"}
+    assert [result["notification"] for result in results] == ["not_required", "not_required", "disabled"]
+    assert results[1]["latency_ms"] == 75
+    assert set(results[0]) == {"name", "status", "http_status", "latency_ms", "notification"}
