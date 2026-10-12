@@ -1,3 +1,9 @@
-requests>=2.31.0
-python-dotenv>=1.0.0
-pytest>=7.4.0
+# Dependencias directas de ejecución: combinación validada, no rangos de compatibilidad.
+requests==2.34.2
+python-dotenv==1.2.2
+
+# Dependencias transitivas de Requests fijadas para evitar cambios del resolvedor.
+certifi==2026.7.22
+charset-normalizer==3.4.9
+idna==3.18
+urllib3==2.7.0

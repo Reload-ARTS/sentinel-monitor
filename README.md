@@ -15,7 +15,7 @@ Monitor HTTP/HTTPS en Python que valida configuración, comprueba disponibilidad
 
 ## Instalación
 
-La [CI](.github/workflows/ci.yml) usa Python **3.11** en Ubuntu. La suite también fue validada en Python 3.13.5 y 3.14.6. Usa una versión verificada; no se mantiene una matriz para otras versiones. Necesitas Git y acceso al índice de paquetes para instalar.
+La versión mínima objetivo es CPython **3.11**; la [CI](.github/workflows/ci.yml) está configurada para comprobar **3.11 y 3.14** en Ubuntu. La nueva matriz requiere validación remota tras publicar el cambio; configurarla no acredita que haya pasado. La suite anterior fue validada en Python 3.13.5 y 3.14.6, pero esa evidencia no sustituye verificar las dependencias fijadas en cada versión. Necesitas Git y acceso al índice de paquetes para instalar.
 
 ```text
 git clone https://github.com/Reload-ARTS/sentinel-monitor.git
@@ -38,7 +38,21 @@ python3 -m venv venv
 cp .env.example .env
 ```
 
-Los comandos usan el intérprete del entorno virtual sin necesitar activación. [requirements.txt](requirements.txt) incluye Requests, python-dotenv y pytest con versiones mínimas: **no es un archivo de bloqueo** y distintas instalaciones pueden resolver versiones diferentes. No hace falta instalar el proyecto como paquete.
+Los comandos usan el intérprete del entorno virtual sin necesitar activación. [requirements.txt](requirements.txt) fija las versiones de Requests, python-dotenv y sus dependencias transitivas para ejecución. [requirements-dev.txt](requirements-dev.txt) incluye ese archivo y añade pytest y sus dependencias para pruebas; colorama solo se instala en Windows. Son versiones concretas de una combinación a validar, no una declaración de compatibilidad con cualquier actualización. No hace falta instalar el proyecto como paquete.
+
+Para desarrollar o ejecutar las pruebas, instala además el conjunto de pruebas:
+
+```powershell
+.\venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\venv\Scripts\python.exe -m pip check
+```
+
+```sh
+./venv/bin/python -m pip install -r requirements-dev.txt
+./venv/bin/python -m pip check
+```
+
+Los pins controlan versiones de paquetes, no el intérprete, el sistema operativo ni los hashes de los artefactos. Usa un venv limpio para reproducir el conjunto; pip no elimina paquetes ajenos ya instalados. Al actualizar una dependencia, revisa sus transitivas y ejecuta la suite en ambas versiones de la matriz. No se añaden gestores de paquetes ni un bloqueo con hashes en esta etapa.
 
 ## Objetivos HTTP
 

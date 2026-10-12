@@ -9,21 +9,25 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
 
     steps:
     - name: Descargar Código del Repositorio
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Configurar Entorno Python 3.11
-      uses: actions/setup-python@v4
+    - name: Configurar Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
       with:
-        python-version: "3.11"
+        python-version: ${{ matrix.python-version }}
 
     - name: Instalar Dependencias
       run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        python -m pip install -r requirements-dev.txt
+        python -m pip check
 
     - name: Ejecutar Pruebas Unitarias con Pytest
       run: |
-        pytest -v
+        python -B -m pytest -p no:cacheprovider -q --tb=short
