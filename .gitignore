@@ -14,3 +14,6 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Documentación privada y bóveda de Obsidian
+/docs-private/
